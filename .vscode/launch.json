@@ -1,0 +1,27 @@
+{
+    "configurations": [
+        {
+            "type": "cppdbg",
+            "request": "launch",
+            "name": "Launch Kernel",
+            "program": "${workspaceFolder}/target/riscv64gc-unknown-none-elf/debug/multiboot-test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "riscv64-elf-gdb",
+            "miDebuggerServerAddress": "127.0.0.1:1234",
+            "setupCommands": [
+                {
+                    "text": "-enable-pretty-printing",
+                    "description": "Enable GDB pretty printing",
+                    "ignoreFailures": true
+                },
+            ],
+            "preLaunchTask": "debug run",
+            "postDebugTask": "kill qemu"
+        },
+    ]
+}
