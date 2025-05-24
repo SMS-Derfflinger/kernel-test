@@ -248,13 +248,15 @@ fn main() -> ! {
         | PageAttribute::GLOBAL
         | PageAttribute::PRESENT;
 
+    // Map 0x80200000-0x80230000 to 0x00000000-0x00030000
     for (idx, pte) in page_table
         .iter_kernel(VRange::from(VAddr::from(0)).grow(0x30000))
         .enumerate()
     {
-        pte.set(PFN::from(idx), Attribute::from_page_attr(attr));
+        pte.set(PFN::from(idx + 0x80200), Attribute::from_page_attr(attr));
     }
 
+    // Map 0x80200000-0x81200000 identically
     for (idx, pte) in page_table
         .iter_kernel(VRange::from(VAddr::from(0x80200000)).grow(0x1000000))
         .enumerate()
