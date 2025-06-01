@@ -3,6 +3,9 @@
 #![feature(naked_functions)]
 
 mod rv64_mm;
+mod fdt;
+
+use fdt::*;
 
 use buddy_allocator::{BuddyAllocator, BuddyRawPage};
 use core::{
@@ -252,7 +255,9 @@ unsafe extern "C" fn _start(hart_id: usize, dtb_addr: usize) -> ! {
 
 fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
     print("Hello World!\n");
-    print_number(dtb_addr);
+
+    let num_harts = get_num_harts(dtb_addr);
+    print_number(num_harts);
     print("\n");
 
     BUDDY
