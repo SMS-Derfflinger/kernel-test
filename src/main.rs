@@ -1,10 +1,15 @@
 #![no_std]
 #![no_main]
+#![feature(naked_functions)]
 
 mod rv64_mm;
 
 use buddy_allocator::{BuddyAllocator, BuddyRawPage};
-use core::{ptr::NonNull, sync::atomic::AtomicUsize};
+use core::{
+    arch::naked_asm,
+    ptr::NonNull,
+    sync::atomic::AtomicUsize,
+};
 use eonix_mm::{
     address::{Addr as _, PAddr, VAddr, VRange},
     page_table::{PageAttribute, PagingMode, RawAttribute, PTE as _},
@@ -12,9 +17,11 @@ use eonix_mm::{
 };
 use intrusive_list::{container_of, Link};
 use riscv::register::satp;
-use riscv_rt::entry;
 use rv64_mm::*;
 use spin::Mutex;
+
+#[link_section = ".bss.stack"]
+static mut BOOT_STACK: [u8; 4096 * 16] = [0; 4096 * 16];
 
 static mut PAGES: [RawPage; 1024] = [const { RawPage::new() }; 1024];
 
@@ -230,9 +237,23 @@ fn read(buffer: &mut [u8]) -> Option<usize> {
     count
 }
 
-#[entry]
-fn main() -> ! {
+/// bootstrap in rust
+#[naked]
+#[no_mangle]
+#[link_section = ".text.entry"]
+unsafe extern "C" fn _start(hart_id: usize, dtb_addr: usize) -> ! {
+    naked_asm!(
+        "la sp, {stack_top}",
+        "j {start_fn}",
+        stack_top = sym BOOT_STACK,
+        start_fn = sym riscv64_start,
+    )
+}
+
+fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
     print("Hello World!\n");
+    print_number(dtb_addr);
+    print("\n");
 
     BUDDY
         .lock()
