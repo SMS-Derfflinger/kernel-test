@@ -7,13 +7,13 @@ use buddy_allocator::{BuddyAllocator, BuddyRawPage};
 use core::{ptr::NonNull, sync::atomic::AtomicUsize};
 use eonix_mm::{
     address::{Addr as _, PAddr, VAddr, VRange},
-    page_table::{PageAttribute, RawAttribute, PTE as _},
+    page_table::{PageAttribute, PagingMode, RawAttribute, PTE as _},
     paging::{Page, PageAccess, PageAlloc, PageBlock, RawPage as RawPageTrait, PFN},
 };
 use intrusive_list::{container_of, Link};
 use riscv::register::satp;
 use riscv_rt::entry;
-use rv64_mm::{Attribute, RV39};
+use rv64_mm::*;
 use spin::Mutex;
 
 static mut PAGES: [RawPage; 1024] = [const { RawPage::new() }; 1024];
@@ -49,15 +49,15 @@ struct RawPageHandle(usize);
 
 impl From<PFN> for RawPageHandle {
     fn from(pfn: PFN) -> Self {
-        assert!(usize::from(pfn) - 0x80300 < 1024, "PFN out of range");
+        assert!(usize::from(pfn) - 0x80400 < 1024, "PFN out of range");
 
-        Self(usize::from(pfn) - 0x80300)
+        Self(usize::from(pfn) - 0x80400)
     }
 }
 
 impl From<RawPageHandle> for PFN {
     fn from(raw_page: RawPageHandle) -> Self {
-        PFN::from(raw_page.0 + 0x80300)
+        PFN::from(raw_page.0 + 0x80400)
     }
 }
 
@@ -176,7 +176,7 @@ impl PageAlloc for BuddyPageAlloc {
     }
 }
 
-type PageTable<'a> = eonix_mm::page_table::PageTable<'a, RV39, BuddyPageAlloc, DirectPageAccess>;
+type PageTable<'a> = eonix_mm::page_table::PageTable<'a, PagingModeSv48, BuddyPageAlloc, DirectPageAccess>;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -236,7 +236,7 @@ fn main() -> ! {
 
     BUDDY
         .lock()
-        .create_pages(PAddr::from(0x80300000), PAddr::from(0x80700000));
+        .create_pages(PAddr::from(0x80400000), PAddr::from(0x80700000));
 
     let root_table_page = Page::alloc_in(BuddyPageAlloc);
 
@@ -248,25 +248,34 @@ fn main() -> ! {
         | PageAttribute::GLOBAL
         | PageAttribute::PRESENT;
 
-    // Map 0x80200000-0x80230000 to 0x00000000-0x00030000
+    // Map 0x80200000-0x81200000 16MB identically, use 2MB page
     for (idx, pte) in page_table
-        .iter_kernel(VRange::from(VAddr::from(0)).grow(0x30000))
+        .iter_kernel_levels(VRange::from(VAddr::from(KIMAGE_PHYS_BASE)).grow(0x1000000), &PagingModeSv48::LEVELS[..=2])
         .enumerate()
     {
-        pte.set(PFN::from(idx + 0x80200), Attribute::from_page_attr(attr));
+        pte.set(PFN::from(idx * 0x200 + 0x80200), PageAttribute64::from_page_attr(attr));
     }
 
-    // Map 0x80200000-0x81200000 identically
+    // Map 0x0000_0000_0000_0000-0x0000_007F_FFFF_FFFF 512GB
+    // to 0xFFFF_FF00_0000_0000 to 0xFFFF_FF7F_FFFF_FFFF, use 1 GB page
     for (idx, pte) in page_table
-        .iter_kernel(VRange::from(VAddr::from(0x80200000)).grow(0x1000000))
+        .iter_kernel_levels(VRange::from(VAddr::from(PHYS_MAP_VIRT)).grow(0x80_0000_0000), &PagingModeSv48::LEVELS[..=1])
         .enumerate()
     {
-        pte.set(PFN::from(idx + 0x80200), Attribute::from_page_attr(attr));
+        pte.set(PFN::from(idx * 0x40000), PageAttribute64::from_page_attr(attr));
+    }
+
+    // Map 2 MB kernel image
+    for (idx, pte) in page_table
+        .iter_kernel(VRange::from(VAddr::from(KIMAGE_VIRT_BASE)).grow(0x20_0000))
+        .enumerate()
+    {
+        pte.set(PFN::from(idx + 0x80200), PageAttribute64::from_page_attr(attr));
     }
 
     unsafe {
         satp::set(
-            satp::Mode::Sv39,
+            satp::Mode::Sv48,
             0,
             usize::from(PFN::from(page_table.addr())),
         );
