@@ -2,35 +2,39 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
+RAM = 0x80200000;
+
 MEMORY
 {
-  RAM : ORIGIN = 0x80200000, LENGTH = 128M
+  VIRT : ORIGIN = 0xffffffff80200000, LENGTH = 128M
 }
 
 SECTIONS
 {
-  .text.entry : {
+  _skernel = .;
+  .text.entry : AT(RAM) {
     KEEP(*(.text.entry))
-  } > RAM
+  } > VIRT
 
   .text : {
     *(.text .text.*)
-  } > RAM
+  } > VIRT
 
   .rodata : {
     *(.rodata .rodata.*)
-  } > RAM
+  } > VIRT
 
   .data : {
     *(.data .data.*)
-  } > RAM
+  } > VIRT
 
   .bss : {
     . = ALIGN(4096);
     *(.bss .bss.*)
     *(.bss.stack)
     *(COMMON)
-  } > RAM
+  } > VIRT
+  _ekernel = .;
 
   /DISCARD/ : {
     *(.eh_frame)

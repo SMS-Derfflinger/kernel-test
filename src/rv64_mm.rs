@@ -9,9 +9,24 @@ use eonix_mm::{
 use crate::{print, print_number};
 
 pub const ROOT_PAGE_TABLE_PHYS_ADDR: usize = 0x8040_0000;
-pub const PHYS_MAP_VIRT: usize = 0xFFFF_FF00_0000_0000;
+pub const PHYS_MAP_VIRT: usize = 0xffff_ffc0_0000_0000;
 pub const KIMAGE_PHYS_BASE: usize = 0x8020_0000;
-pub const KIMAGE_VIRT_BASE: usize = 0xFFFF_FFFF_FFC0_0000;
+pub const KIMAGE_OFFSET: usize = 0xffff_ffff_0000_0000;
+pub const MMIO_VIRT_BASE: usize = KIMAGE_OFFSET;
+pub const KIMAGE_VIRT_BASE: usize = KIMAGE_OFFSET + KIMAGE_PHYS_BASE;
+pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
+pub const PAGE_SIZE_BITS: usize = 12;
+pub const MEMORY_SIZE: usize = 0x1F_C000_0000;
+
+pub const PTE_SIZE: usize = 8;
+pub const PTES_PER_PAGE: usize = PAGE_SIZE / PTE_SIZE;
+
+#[derive(Clone, Copy)]
+pub enum PageSize {
+    _4KbPage = 4096,
+    _2MbPage = 2 * 1024 * 1024,
+    _1GbPage = 1 * 1024 * 1024 * 1024,
+}
 
 pub const PAGE_TABLE_BASE: PFN = PFN::from_val(ROOT_PAGE_TABLE_PHYS_ADDR);
 
@@ -41,9 +56,9 @@ pub struct PTE64(pub u64);
 #[derive(Clone, Copy)]
 pub struct PageAttribute64(u64);
 
-pub struct RawPageTableSv48<'a>(NonNull<PTE64>, PhantomData<&'a ()>);
+pub struct RawPageTableSv39<'a>(NonNull<PTE64>, PhantomData<&'a ()>);
 
-pub struct PagingModeSv48;
+pub struct PagingModeSv39;
 
 impl PTE for PTE64 {
     type Attr = PageAttribute64;
@@ -59,11 +74,10 @@ impl PTE for PTE64 {
     }
 }
 
-impl PagingMode for PagingModeSv48 {
+impl PagingMode for PagingModeSv39 {
     type Entry = PTE64;
-    type RawTable<'a> = RawPageTableSv48<'a>;
+    type RawTable<'a> = RawPageTableSv39<'a>;
     const LEVELS: &'static [PageTableLevel] = &[
-        PageTableLevel::new(39, 9),
         PageTableLevel::new(30, 9),
         PageTableLevel::new(21, 9),
         PageTableLevel::new(12, 9),
@@ -71,7 +85,7 @@ impl PagingMode for PagingModeSv48 {
     const KERNEL_ROOT_TABLE_PFN: PFN = PAGE_TABLE_BASE;
 }
 
-impl<'a> RawPageTable<'a> for RawPageTableSv48<'a> {
+impl<'a> RawPageTable<'a> for RawPageTableSv39<'a> {
     type Entry = PTE64;
 
     fn index(&self, index: u16) -> &'a Self::Entry {
@@ -216,5 +230,5 @@ impl RawAttribute for PageAttribute64 {
     }
 }
 
-pub type DefaultPagingMode = PagingModeSv48;
+pub type DefaultPagingMode = PagingModeSv39;
 

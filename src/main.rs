@@ -9,22 +9,34 @@ use fdt::*;
 
 use buddy_allocator::{BuddyAllocator, BuddyRawPage};
 use core::{
-    arch::naked_asm,
+    arch::{global_asm, naked_asm},
     ptr::NonNull,
     sync::atomic::AtomicUsize,
 };
 use eonix_mm::{
-    address::{Addr as _, PAddr, VAddr, VRange},
-    page_table::{PageAttribute, PagingMode, RawAttribute, PTE as _},
+    address::{Addr as _, AddrOps, PAddr, VAddr, VRange},
+    page_table::{self, PageAttribute, PagingMode, RawAttribute, PTE as _},
     paging::{Page, PageAccess, PageAlloc, PageBlock, RawPage as RawPageTrait, PFN},
 };
 use intrusive_list::{container_of, Link};
-use riscv::register::satp;
+use riscv::{asm::sfence_vma_all, register::satp};
 use rv64_mm::*;
 use spin::Mutex;
 
+//global_asm!(include_str!("entry.S"));
+
 #[link_section = ".bss.stack"]
 static mut BOOT_STACK: [u8; 4096 * 16] = [0; 4096 * 16];
+
+#[repr(C, align(4096))]
+struct BootPageTable([u64; PTES_PER_PAGE]);
+
+static mut BOOT_PAGE_TABLE: BootPageTable = {
+    let mut arr: [u64; PTES_PER_PAGE] = [0; PTES_PER_PAGE];
+    arr[2] = (0x80000 << 10) | 0xcf;
+    arr[510] = (0x80000 << 10) | 0xcf;
+    BootPageTable(arr)
+};
 
 static mut PAGES: [RawPage; 1024] = [const { RawPage::new() }; 1024];
 
@@ -186,7 +198,7 @@ impl PageAlloc for BuddyPageAlloc {
     }
 }
 
-type PageTable<'a> = eonix_mm::page_table::PageTable<'a, PagingModeSv48, BuddyPageAlloc, DirectPageAccess>;
+type PageTable<'a> = eonix_mm::page_table::PageTable<'a, PagingModeSv39, BuddyPageAlloc, DirectPageAccess>;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -240,20 +252,91 @@ fn read(buffer: &mut [u8]) -> Option<usize> {
     count
 }
 
+extern "C" {
+    fn _ekernel();
+}
+
 /// bootstrap in rust
 #[naked]
 #[no_mangle]
 #[link_section = ".text.entry"]
 unsafe extern "C" fn _start(hart_id: usize, dtb_addr: usize) -> ! {
     naked_asm!(
-        "la sp, {stack_top}",
-        "j {start_fn}",
-        stack_top = sym BOOT_STACK,
-        start_fn = sym riscv64_start,
+        "
+        la   sp, {boot_stack}
+        la   t0, {page_table}
+        srli t0, t0, 12
+        li   t1, 8 << 60
+        or   t0, t0, t1
+        csrw satp, t0
+        sfence.vma
+        li   t2, {virt_ram_offset}
+        or   sp, sp, t2
+        la   t3, riscv64_start
+        or   t3, t3, t2
+        jalr t3                      // call riscv64_start
+        ",
+        boot_stack = sym BOOT_STACK,
+        page_table = sym BOOT_PAGE_TABLE,
+        virt_ram_offset = const KIMAGE_OFFSET,
     )
 }
 
-fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
+fn map_physical_memory(page_table: &PageTable, attr: PageAttribute) {
+    let ekernel = _ekernel as usize - 0xffff_ffff_0000_0000;
+
+    let start = PAddr::from(ekernel).ceil_to(PageSize::_4KbPage as usize);
+    let end = PAddr::from(ekernel).ceil_to(PageSize::_2MbPage as usize);
+    let size_4kb = end - start;
+    let range = VRange::from(VAddr::from(PHYS_MAP_VIRT + start.addr())).grow(size_4kb);
+    let pfn_start = start.addr() >> PAGE_SIZE_BITS;
+    print_number(range.start().addr() - PHYS_MAP_VIRT);
+    print("\n");
+    print_number(start.addr());
+    print("\n");
+    for (idx, pte) in page_table
+        .iter_kernel_levels(range, &PagingModeSv39::LEVELS[..=2])
+        .enumerate()
+    {
+        pte.set(PFN::from(idx + pfn_start), PageAttribute64::from_page_attr(attr));
+    }
+
+    let start = end;
+    let end = start.ceil_to(PageSize::_1GbPage as usize);
+    let size_2mb = end - start;
+    let range = VRange::from(VAddr::from(PHYS_MAP_VIRT + start.addr())).grow(size_2mb);
+    let pfn_start = start.addr() >> PAGE_SIZE_BITS;
+    print_number(range.start().addr() - PHYS_MAP_VIRT);
+    print("\n");
+    print_number(start.addr());
+    print("\n");
+    for (idx, pte) in page_table
+        .iter_kernel_levels(range, &PagingModeSv39::LEVELS[..=1])
+        .enumerate()
+    {
+        pte.set(PFN::from(idx * 0x200 + pfn_start), PageAttribute64::from_page_attr(attr));
+    }
+
+    let start = end;
+    let size_1gb = MEMORY_SIZE;
+    let range = VRange::from(VAddr::from(PHYS_MAP_VIRT + start.addr())).grow(size_1gb);
+    let pfn_start = start.addr() >> PAGE_SIZE_BITS;
+    print_number(range.start().addr() - PHYS_MAP_VIRT);
+    print("\n");
+    print_number(start.addr());
+    print("\n");
+    for (idx, pte) in page_table
+        .iter_kernel_levels(range, &PagingModeSv39::LEVELS[..=0])
+        .enumerate()
+    {
+        pte.set(PFN::from(idx * 0x40000 + pfn_start), PageAttribute64::from_page_attr(attr));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
+    print_number(BOOT_STACK.as_ptr() as usize - 0xffff_ffff_0000_0000);
+    print("\n");
     print("Hello World!\n");
 
     let num_harts = get_num_harts(dtb_addr);
@@ -274,22 +357,25 @@ fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
         | PageAttribute::GLOBAL
         | PageAttribute::PRESENT;
 
-    // Map 0x80200000-0x81200000 16MB identically, use 2MB page
+    // Map 0x00000000-0x7fffffff 2GB MMIO,
+    // to 0xffff ffff 0000 0000 to 0xffff ffff 7ffff ffff, use 1GB page
     for (idx, pte) in page_table
-        .iter_kernel_levels(VRange::from(VAddr::from(KIMAGE_PHYS_BASE)).grow(0x1000000), &PagingModeSv48::LEVELS[..=2])
-        .enumerate()
-    {
-        pte.set(PFN::from(idx * 0x200 + 0x80200), PageAttribute64::from_page_attr(attr));
-    }
-
-    // Map 0x0000_0000_0000_0000-0x0000_007F_FFFF_FFFF 512GB
-    // to 0xFFFF_FF00_0000_0000 to 0xFFFF_FF7F_FFFF_FFFF, use 1 GB page
-    for (idx, pte) in page_table
-        .iter_kernel_levels(VRange::from(VAddr::from(PHYS_MAP_VIRT)).grow(0x80_0000_0000), &PagingModeSv48::LEVELS[..=1])
+        .iter_kernel_levels(VRange::from(VAddr::from(MMIO_VIRT_BASE)).grow(0x2000_0000), &PagingModeSv39::LEVELS[..=0])
         .enumerate()
     {
         pte.set(PFN::from(idx * 0x40000), PageAttribute64::from_page_attr(attr));
     }
+
+    map_physical_memory(&page_table, attr);
+
+    /*// Map 0x0000_0000_0000_0000-0x0000_001F_FFFF_FFFF 128GB
+    // to 0xffff_ffd6_0000_0000 to 0xffff_fff5_ffff_ffff, use 1 GB page
+    for (idx, pte) in page_table
+        .iter_kernel_levels(VRange::from(VAddr::from(PHYS_MAP_VIRT)).grow(0x20_0000_0000), &PagingModeSv39::LEVELS[..=0])
+        .enumerate()
+    {
+        pte.set(PFN::from(idx * 0x40000), PageAttribute64::from_page_attr(attr));
+    }*/
 
     // Map 2 MB kernel image
     for (idx, pte) in page_table
@@ -301,11 +387,12 @@ fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
 
     unsafe {
         satp::set(
-            satp::Mode::Sv48,
+            satp::Mode::Sv39,
             0,
             usize::from(PFN::from(page_table.addr())),
         );
     }
+    sfence_vma_all();
 
     print("paging enabled\n");
 
