@@ -25,12 +25,13 @@ use spin::Mutex;
 
 //global_asm!(include_str!("entry.S"));
 
-#[link_section = ".bss.stack"]
+#[link_section = ".bootstack"]
 static mut BOOT_STACK: [u8; 4096 * 16] = [0; 4096 * 16];
 
 #[repr(C, align(4096))]
 struct BootPageTable([u64; PTES_PER_PAGE]);
 
+#[link_section = ".bootdata"]
 static mut BOOT_PAGE_TABLE: BootPageTable = {
     let mut arr: [u64; PTES_PER_PAGE] = [0; PTES_PER_PAGE];
     arr[2] = (0x80000 << 10) | 0xcf;
@@ -38,6 +39,7 @@ static mut BOOT_PAGE_TABLE: BootPageTable = {
     BootPageTable(arr)
 };
 
+#[link_section = ".bootdata"]
 static mut PAGES: [RawPage; 1024] = [const { RawPage::new() }; 1024];
 
 const fn page(index: usize) -> &'static mut RawPage {
@@ -167,6 +169,7 @@ impl PageAccess for DirectPageAccess {
     }
 }
 
+#[link_section = ".bootdata"]
 static BUDDY: Mutex<BuddyAllocator<RawPageHandle>> = Mutex::new(BuddyAllocator::new());
 
 #[derive(Clone)]
@@ -333,11 +336,32 @@ fn map_physical_memory(page_table: &PageTable, attr: PageAttribute) {
     }
 }
 
+global_asm!(
+    r#"
+    .section .text.ap_boot
+    .globl ap_boot_entry
+
+    ap_boot_entry:
+        csrr a0, mhartid
+    "#
+);
+
+extern "C" {
+    fn ap_boot_entry();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
-    print_number(BOOT_STACK.as_ptr() as usize - 0xffff_ffff_0000_0000);
     print("\n");
     print("Hello World!\n");
+
+    print("ap_boot_entry:\n");
+    print_number(ap_boot_entry as usize - KIMAGE_OFFSET);
+    print("\n");
+
+    print("hart_id:\n");
+    print_number(hart_id);
+    print("\n");
 
     let num_harts = get_num_harts(dtb_addr);
     print_number(num_harts);
@@ -395,6 +419,11 @@ pub unsafe extern "C" fn riscv64_start(hart_id: usize, dtb_addr: usize) -> ! {
     sfence_vma_all();
 
     print("paging enabled\n");
+    print("stack message:\n");
+    print_number(BOOT_STACK.as_ptr() as usize - KIMAGE_OFFSET);
+    print("\n");
+    print_number(BOOT_STACK.as_ptr() as usize + BOOT_STACK.len() - KIMAGE_OFFSET);
+    print("\n");
 
     let mut buffer = [0u8; 4096];
     loop {
